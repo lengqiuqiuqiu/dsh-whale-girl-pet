@@ -218,6 +218,15 @@ dsh plugin --profile web add dsh-whale-girl-pet-0.3.0.tgz
 
 ## 📝 更新记录
 
+### 0.3.10
+- **修复 [issue #11](https://github.com/yanzwzz/dsh-whale-girl-pet/issues/11)：后台任务完成气泡把整条命令原文塞进来**。DSH 的 `tool-pwsh` / `tool-bash` 注册后台任务时把整条 `args.command` 当 `job.label`，旧实现直接 `'「' + label + '」'` 拼进气泡 —— 357 字符的命令能占满一屏。
+  - **气泡改成「类型 + 用时」**：`[ PowerShell 命令 · 用时 3 秒 ] 搞定啦～`，命令原文不再进气泡。kind 按 DSH 现有的四种映射（`bash` → Shell 命令、`pwsh` → PowerShell 命令、`pty-send` → 终端命令、`workflow` → 工作流）；**未知 kind**（本插件订阅 `owners: 'all'`，也会收到别的插件起的 job）只在 label 折叠空白后 ≤24 字时才当"名字"显示，超长一律退回「后台任务」—— 不做"像不像命令"的猜测，只按长度切；起止时间缺失时只显示类型，不再出现"用时 0 秒"。
+  - **非零退出不再被吞掉**：DSH 把失败的命令也标成 `completed`（`tool-pwsh/background.ts` 的 `processOutcome()`：非 killed 一律 `{ status: 'completed', detail: 'exit code: N' }`），所以 `exit 9` 的命令以前同样说「搞定啦～」。现在显示 `[ Shell 命令 · 用时 9 秒 ] 退出了：exit code: 9` 并按失败推送（气泡走失败配色与提示音）；`exit code: 0` 仍是「搞定啦～」，`detail` 里的沙箱说明一并保留。
+  - **子代理 / 工作流气泡**：括号一并换成 ASCII；工作流名（用户自填长文本）封顶 36 字，不再整条丢。
+- **🚫 `「」` 缺字形**：部分字体栈里 `「」`（U+300C / U+300D）没有字形、渲染成方框。宿主 6 处气泡文案 + 浏览器半侧 4 处用户可见文本（打字气泡的"正在调用…"，以及设置面板里位置与大小 / 取当前位置 / 气泡花费的说明）全部换成 ASCII `[ ]`；源码注释不动。
+- **🔬 测试**：单测 **160 项**全部通过（`npm test`）。`test/host-routes.test.mjs` 补上了 `jobs` 事件流桩与 `ctx.get('jobs')` 分支 —— 这条路径**原先零覆盖**（假 ctx 里 `ctx.get('jobs')` 恒为 `undefined`），issue #11 正是从这个盲区出来的。新增断言：气泡里不得出现命令的任意 40 字子串、`label: null` 不得渲染出 `null`、非零退出必须 `ok:false`、`message`/`title` 不得含 U+300C/U+300D、`cause: 'teardown'` 仍被忽略。
+- **🧪 测试脚手架**：新增 `scripts/dsh-resolve.mjs`（跑 `node --test` 时把宿主提供的依赖 —— `@deepseek-ai/*` 与 `zod` —— 从 DSH 安装 / 检出里兜出来），`package.json` 补 `scripts.test`；`scripts/verify-dsh-0.1.7.mjs` 的运行说明补上第二个 `--import`，否则在没装 `node_modules` 的工作区会先报 `ERR_MODULE_NOT_FOUND: zod`。
+
 ### 0.3.9
 - **修复 [issue #10](https://github.com/yanzwzz/dsh-whale-girl-pet/issues/10)：`size` / `position` 配了不生效，界面上也无处可调**。两个字段在宿主 schema 里定义了、也标了 volatile，但客户端 `Pet` 一直从**空的**客户端 `config` 参数读它们（DSH 这条管线尚未打通），于是永远走 `|| 260` / `'bottom-right'`；而 0.2.x 起"插件配置该放哪"改成了**插件自己在 Plugins 页注册 `plugins.bundle.config` / `plugins.row.config`**，已经没有任何"自动把 volatile 字段画成表单"的兜底渲染器 —— 于是 `test/notify.test.mjs` 里那条「size / position 由 DSH 原生表单负责，豁免」的前提失效，两个字段掉进了夹缝：宿主有值、镜像里有描述符、界面上没人画。
   - **面板可填数值**：「桌宠配置 → 宠物与外观」新增「位置与大小」——尺寸（px，40-400）与位置 X/Y（视口 px）可直接填数字后点**应用**；「取当前位置」把宠物当下的坐标填进输入框；「默认角落」补上右下 / 左下（`position` 第一次真正可达）；「恢复默认角落」用 `unset` 清掉固定位置、回到随窗口自适应的角落。
@@ -379,7 +388,9 @@ dsh-whale-girl-pet/
 ├── assets/thumb/           360×360 播放用动画（随包发布）
 ├── assets/preview/         README 预览图 / 收款码
 ├── scripts/
-│   └── sync-install.ps1    开发用：把工作区同步到已安装副本，并判断要不要重启 dsh web
+│   ├── sync-install.ps1    开发用：把工作区同步到已安装副本，并判断要不要重启 dsh web
+│   ├── dsh-resolve.mjs     开发用：跑 node --test 时把宿主提供的依赖（@deepseek-ai/*、zod）兜出来
+│   └── verify-dsh-0.1.7.mjs 开发用：在 DSH 检出里跑一遍宿主半侧兼容性验证（设置写回 / 路由 / jobs 事件流）
 ├── test/                   单测（node --test，不发布）
 └── cordis.patch.yml        bundle patch：把插件行挂进 DSH 配置树
 ```
@@ -391,11 +402,11 @@ dsh-whale-girl-pet/
 ## 🛠️ 开发
 
 ```sh
-node --test "test/*.test.mjs"     # 跑单测（76 项，零依赖，只用 node:test）
+npm test                          # 跑单测（160 项；scripts/dsh-resolve.mjs 把宿主提供的依赖兜出来）
 ```
 
 - 客户端 bundle 是**手写**的 `window.__ModuleLoader__.load({ id, factory })` 形态，零构建步骤。
-- ⚠️ **改完必须同步到已安装副本，再重启 `dsh web`**：profile 里装的是**副本**（不是软链），插件 bundle 又在进程启动时就载入内存。漏掉同步会出现"重启了但现象没变"这种极难查的假象（本仓库开发过程中真的踩过一次）。脚本一步搞定，并顺带判断当前进程是否需要重启：
+- ⚠️ **改完必须重启 `dsh web`**：web profile 里那份 `~/.dsh/profiles/web/node_modules/dsh-whale-girl-pet` 现在是指向本目录的 **junction**，所以文件层面改动是即时可见的；但插件 bundle 在进程启动时就载入内存并按 URL 记住编译结果，**只刷新页面不生效**。脚本会逐字节校验并判断当前进程是否需要重启：
 
   ```powershell
   pwsh -File scripts/sync-install.ps1            # 同步 + 校验 + 提示是否需重启

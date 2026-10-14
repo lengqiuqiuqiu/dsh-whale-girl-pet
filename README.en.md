@@ -211,6 +211,15 @@ See DSH Settings → "Pet Config" (all options live, written into the profile pa
 
 ## 📝 Changelog
 
+### 0.3.10
+- **Fixes [issue #11](https://github.com/yanzwzz/dsh-whale-girl-pet/issues/11): the background-task bubble pasted the whole command line.** DSH's `tool-pwsh` / `tool-bash` register background jobs with `label: args.command`, and the old code spliced that straight into the bubble — a 357-character command filled the screen.
+  - **The bubble is now "kind + duration"**: `[ PowerShell 命令 · 用时 3 秒 ] 搞定啦～`, and the command text never enters the bubble. Kinds map over the four DSH registers (`bash` → "Shell 命令", `pwsh` → "PowerShell 命令", `pty-send` → "终端命令", `workflow` → "工作流"). An **unknown kind** (the plugin subscribes with `owners: 'all'`, so other plugins' jobs arrive too) is only shown when its label is ≤24 characters after whitespace collapsing, otherwise it falls back to "后台任务" — length decides, with no attempt to guess "does this look like a command"; with no start/finish timestamps only the kind is shown, so there is no "用时 0 秒".
+  - **Non-zero exits are no longer swallowed**: DSH marks a failed command as `completed` too (`processOutcome()` in `tool-pwsh/background.ts`: everything that was not killed becomes `{ status: 'completed', detail: 'exit code: N' }`), so an `exit 9` command used to report "搞定啦～" as well. It now shows `[ Shell 命令 · 用时 9 秒 ] 退出了：exit code: 9` and is pushed as a failure (failure bubble colours and chime); `exit code: 0` still says "搞定啦～", and sandbox notes in `detail` are preserved.
+  - **Subagent / workflow bubbles**: brackets switched to ASCII; a workflow name (user-supplied free text) is capped at 36 characters instead of being dropped entirely.
+- **🚫 Missing `「」` glyphs**: in some font stacks U+300C / U+300D have no glyph and render as boxes. Six host bubble strings plus four user-visible strings in the browser half (the "正在调用…" typing bubble, and the position & size / use-current-position / bubble-cost notes in the settings panel) now use ASCII `[ ]`; source comments are untouched.
+- **🔬 Tests**: **160 cases pass** (`npm test`). `test/host-routes.test.mjs` gains a `jobs` event-stream stub and the `ctx.get('jobs')` branch — that path had **zero coverage** (the fake ctx returned `undefined` for `ctx.get('jobs')`), which is exactly how issue #11 slipped through. New assertions: no 40-character slice of the command may appear in a bubble, `label: null` must not render `null`, a non-zero exit must be `ok:false`, `message`/`title` must not contain U+300C/U+300D, and `cause: 'teardown'` must still be ignored.
+- **🧪 Test scaffolding**: new `scripts/dsh-resolve.mjs` (resolves the host-provided deps — `@deepseek-ai/*` and `zod` — from the DSH installation/checkout when running `node --test`), `package.json` gains `scripts.test`; the run instructions in `scripts/verify-dsh-0.1.7.mjs` now include the second `--import`, without which a workspace with no `node_modules` fails at `ERR_MODULE_NOT_FOUND: zod`.
+
 ### 0.3.9
 - **Fixes [issue #10](https://github.com/yanzwzz/dsh-whale-girl-pet/issues/10): `size` / `position` had no effect and no UI anywhere.** Both fields exist in the host schema and are volatile, but the client `Pet` read them from the **empty** client-side `config` argument (that DSH pipeline was never wired), so they always fell back to `|| 260` / `'bottom-right'`. And since 0.2.x a plugin's configuration belongs on the Plugins page (`plugins.bundle.config` / `plugins.row.config`, registered by the plugin itself) — there is no fallback renderer that turns volatile fields into a form, so the `size` / `position` exemption in `test/notify.test.mjs` ("handled by the native DSH form") no longer held and the two fields fell through the crack: the host had values, the mirror had descriptors, nothing drew them.
   - **Numeric fields in the panel**: "Pet Config → Pet & Appearance" gains a Position & Size block — size (px, 40–400) and position X/Y (viewport px) can be typed and applied with **Apply**; "Use current position" fills the pet's present coordinates; "Default corner" adds bottom-right / bottom-left (the `position` field is reachable for the first time); "Reset to corner" `unset`s the pinned position and goes back to the responsive corner.
@@ -382,7 +391,7 @@ dsh-whale-girl-pet/
 ## 🛠️ Development
 
 ```sh
-node --test "test/*.test.mjs"     # 76 tests, zero dependencies, node:test only
+npm test                          # 160 tests; scripts/dsh-resolve.mjs supplies the host-provided deps
 ```
 
 - The browser bundle is a **hand-written** `window.__ModuleLoader__.load({ id, factory })` file with no build step: edit `lib/client.js` and restart `dsh web`.

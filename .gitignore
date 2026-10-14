@@ -6,3 +6,6 @@ node_modules/
 Thumbs.db
 # 本地侦察脚本（CDP 探针等），不属于插件功能，别被 git add -A 顺手提交
 .research/
+# 安装副本同步标记：sync-install.ps1 写进"目标副本"，但 web profile 那份是指向本目录的
+# junction，标记实际落在本目录 → 不忽略就会一直出现在 git status 里
+.last-sync

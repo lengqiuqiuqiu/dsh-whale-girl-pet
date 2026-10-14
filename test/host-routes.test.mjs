@@ -62,10 +62,35 @@ function makeCtx(options = {}) {
       if (name === 'agents') return options.agents !== undefined ? options.agents : { list: () => [], roots: () => [] };
       if (name === 'sessions') return options.sessions;
       if (name === 'sessionPersistence') return undefined;
+      if (name === 'jobs') return options.jobs;
       return undefined;
     },
   };
   return { ctx, routes, projections, listeners, warnings, mutations };
+}
+
+/**
+ * 假 jobs 服务：只实现插件用到的事件流（`jobs.events.subscribe`）。
+ *
+ * 【为什么需要它】makeCtx 原先没有 jobs 分支，`ctx.get('jobs')` 恒为 undefined，
+ * 于是"后台任务完成气泡"整段代码在 CI 里**从没跑过** —— issue #11（气泡播报整条命令）
+ * 正是从这个盲区出来的。
+ * @returns { jobs, subscribers, settle } —— settle(job, cause) 驱动一次 settled 事件。
+ */
+function makeJobs() {
+  const subscribers = [];
+  const jobs = {
+    events: {
+      subscribe: (filter, listener) => { subscribers.push({ filter, listener }); return () => {}; },
+    },
+  };
+  return {
+    jobs,
+    subscribers,
+    settle: (job, cause = 'producer') => {
+      for (const entry of subscribers) entry.listener({ type: 'settled', cause, job });
+    },
+  };
 }
 
 /** 打一条已注册的路由，返回 { status, json, text }。 */
@@ -417,4 +442,100 @@ test('issue #10：设置读接口同时返回 value 与 writable（只读实例�
   apply(readOnly.ctx, readOnly.ctx.fiber.config);
   const denied = await hit(readOnly.routes, '/api/whale-pet/settings');
   assert.equal(denied.json.writable, false, '只读实例必须如实上报 writable=false');
+});
+
+/**
+ * issue #11：后台任务完成气泡不得播报整条命令。
+ *
+ * 【真实故障】DSH 的 pwsh/bash 工具把整条 `args.command` 当 job.label 注册
+ * （`packages/shell/tool-pwsh`: `kind: 'pwsh', label: args.command`），旧实现直接
+ * `'「' + label + '」'` 拼进气泡 —— 357 字符的命令占满一屏。
+ * 现在改成「类型 + 用时」；label 只在折叠空白后 ≤24 字的"名字"时才显示。
+ */
+test('issue #11：后台任务气泡显示「类型 + 用时」，绝不播报命令原文', async () => {
+  const j = makeJobs();
+  const h = makeCtx({ jobs: j.jobs });
+  apply(h.ctx, h.ctx.fiber.config);
+  assert.equal(j.subscribers.length, 1, '必须订阅 jobs 事件流（DSH ≥0.1.7 已删除 onJobDone）');
+
+  const command = 'Get-Location | Select-Object -ExpandProperty Path; ' + 'x'.repeat(320);
+  j.settle({ id: 'pwsh-1', kind: 'pwsh', label: command, status: 'completed', startedAt: 1_000, finishedAt: 4_200 });
+  j.settle({ id: 'bash-1', kind: 'bash', label: 'sleep 60', status: 'completed', startedAt: 1_000 });
+  j.settle({ id: 'pty-1', kind: 'pty-send', label: command, status: 'completed' });
+  j.settle({ id: 'custom-1', kind: 'other-plugin', label: command, status: 'completed', startedAt: 1_000, finishedAt: 2_000 });
+  j.settle({ id: 'custom-2', kind: 'other-plugin', label: '下载模型权重', status: 'completed' });
+  j.settle({ id: 'custom-3', label: null, status: 'completed' });
+  j.settle({ id: 'bash-2', kind: 'bash', label: 'pnpm test', status: 'failed', detail: 'exit code: 1', startedAt: 1_000, finishedAt: 2_000 });
+  j.settle({ id: 'bash-3', kind: 'bash', label: 'pnpm test', status: 'killed', startedAt: 1_000, finishedAt: 2_000 });
+  // 【非零退出】DSH 的契约：非零退出也是 completed，退出码只在 detail 里
+  // （tool-pwsh/background.ts 的 processOutcome）—— 必须走「退出了」文案。
+  j.settle({ id: 'bash-4', kind: 'bash', label: 'pnpm test', status: 'completed', detail: 'exit code: 0', startedAt: 1_000, finishedAt: 2_000 });
+  j.settle({ id: 'bash-5', kind: 'bash', label: 'pnpm test', status: 'completed', detail: 'exit code: 9', startedAt: 1_000, finishedAt: 2_000 });
+  j.settle({ id: 'bash-6', kind: 'bash', label: 'pnpm test', status: 'completed', detail: 'exit code: 7; [sandbox: runner failed]', startedAt: 1_000, finishedAt: 2_000 });
+
+  const res = await hit(h.routes, '/api/whale-pet/state');
+  const messages = res.json.items.filter((item) => item.type === 'done').map((item) => item.message);
+  assert.deepEqual(messages, [
+    '[ PowerShell 命令 · 用时 3 秒 ] 搞定啦～',
+    '[ Shell 命令 ] 搞定啦～',
+    '[ 终端命令 ] 搞定啦～',
+    '[ 后台任务 · 用时 1 秒 ] 搞定啦～',
+    '[ 下载模型权重 ] 搞定啦～',
+    '[ 后台任务 ] 搞定啦～',
+    '[ Shell 命令 · 用时 1 秒 ] 翻车了：exit code: 1',
+    '[ Shell 命令 · 用时 1 秒 ] 被取消了～',
+    '[ Shell 命令 · 用时 1 秒 ] 搞定啦～',
+    '[ Shell 命令 · 用时 1 秒 ] 退出了：exit code: 9',
+    '[ Shell 命令 · 用时 1 秒 ] 退出了：exit code: 7; [sandbox: runner failed]',
+  ], '气泡文案必须稳定：已知 kind 用类型名 + 用时；未知 kind 只认短名字；长 label 一律不显示；非零退出要报「退出了」');
+
+  // 非零退出必须按失败处理（配色 + 提示音走 ok:false），exit code: 0 不得被当成失败
+  const exited = res.json.items.filter((item) => item.type === 'done' && String(item.message).includes('退出了'));
+  assert.equal(exited.length, 2, '两条非零退出必须走「退出了」文案');
+  for (const item of exited) assert.equal(item.ok, false, '非零退出必须以 ok:false 推送');
+
+  const head = command.slice(0, 40);
+  for (const message of messages) {
+    assert.ok(!message.includes(head), '任何气泡都不得出现命令原文：' + message);
+    assert.ok(!message.includes('null'), 'label 为 null 时不得渲染出字符串 null：' + message);
+    assert.ok(!message.includes('\u300C') && !message.includes('\u300D'),
+      '不得再用 U+300C/U+300D（部分字体栈缺字形，会渲染成方框）：' + message);
+  }
+});
+
+/**
+ * issue #11 附带两项：子代理 / 工作流气泡的括号，以及工作流名超长。
+ * 顺带钉住"teardown 结算不算任务完成"这条既有行为，别被这次重构带跑。
+ */
+test('issue #11：子代理/工作流气泡用 ASCII 括号，工作流名超长必须截断', async () => {
+  const j = makeJobs();
+  const h = makeCtx({ jobs: j.jobs });
+  apply(h.ctx, h.ctx.fiber.config);
+
+  // 组合卸载时的结算不是"任务完成"：必须继续被忽略
+  j.settle({ id: 'pwsh-9', kind: 'pwsh', label: 'x', status: 'completed' }, 'teardown');
+  const afterTeardown = await hit(h.routes, '/api/whale-pet/state');
+  assert.equal(afterTeardown.json.items.filter((item) => item.type === 'done').length, 0,
+    'cause=teardown 不得弹完成气泡');
+
+  const subagent = h.listeners.find((entry) => entry.event === 'subagent/end');
+  assert.ok(subagent !== undefined, '必须监听 subagent/end');
+  subagent.handler({ provider: 'deepseek', stopReason: 'completed' });
+
+  const workflow = h.listeners.find((entry) => entry.event === 'workflow/end');
+  assert.ok(workflow !== undefined, '必须监听 workflow/end');
+  const longName = '工作流名字'.repeat(10);
+  workflow.handler({ meta: { name: longName } }, { stopReason: 'completed' });
+
+  const done = (await hit(h.routes, '/api/whale-pet/state')).json.items.filter((item) => item.type === 'done');
+  assert.equal(done.length, 2, '子代理与工作流各一条气泡');
+  assert.equal(done[0].message, '[ deepseek ] 的活儿干完啦～');
+  assert.ok(done[1].message.startsWith('[ ' + longName.slice(0, 35) + '… ]'),
+    '工作流名必须截断到 36 字（含省略号），不得整条丢掉：' + done[1].message);
+  for (const item of done) {
+    for (const text of [item.message, item.title]) {
+      assert.ok(!text.includes('\u300C') && !text.includes('\u300D'),
+        'message 与 title 都不得再用 U+300C/U+300D：' + text);
+    }
+  }
 });

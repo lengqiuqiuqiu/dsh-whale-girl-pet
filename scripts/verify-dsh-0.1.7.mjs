@@ -23,7 +23,13 @@
  *
  * 运行：
  *   cd D:\deepseek-harness
- *   node --import tsx/esm "<插件目录>/scripts/verify-dsh-0.1.7.mjs"
+ *   node --import tsx/esm --import "<插件目录>/scripts/dsh-resolve.mjs" "<插件目录>/scripts/verify-dsh-0.1.7.mjs"
+ *
+ * 【为什么要加第二个 --import】插件目录**没有 node_modules**，`lib/` 里的裸导入
+ * （@deepseek-ai/*、zod）平时由 DSH 的解析拦截层提供，裸 node 解析不到 —— 于是
+ * 脚本还没跑到 [2] 就 `ERR_MODULE_NOT_FOUND: zod`。`scripts/dsh-resolve.mjs` 就是
+ * `npm test` 用的那个兜底钩子，这里复用；路径含空格时用 file:// URL，例如
+ *   --import "file:///D:/SRC/dsh%20work/dsh-whale-pet/scripts/dsh-resolve.mjs"
  *
  * 路径都不再写死：插件根目录由本脚本位置推出（scripts/ 的上一级），
  * DSH 检出默认 D:/deepseek-harness、可用环境变量 DSH_CHECKOUT 覆盖。
